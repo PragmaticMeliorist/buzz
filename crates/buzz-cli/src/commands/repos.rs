@@ -240,6 +240,27 @@ pub(crate) fn build_create_announcement(
     Ok(builder)
 }
 
+/// Append one NIP-34 `maintainers` tag listing each pubkey (hex or npub) as
+/// lowercase hex. No pubkeys means no tag.
+pub(crate) fn with_maintainers(
+    builder: EventBuilder,
+    maintainers: &[String],
+) -> Result<EventBuilder, CliError> {
+    let mut values = vec!["maintainers".to_string()];
+    for maintainer in maintainers {
+        let hex = nostr::PublicKey::parse(maintainer.trim())
+            .map_err(|_| CliError::Usage(format!("invalid --maintainer pubkey: {maintainer}")))?
+            .to_hex();
+        if !values.contains(&hex) {
+            values.push(hex);
+        }
+    }
+    if values.len() == 1 {
+        return Ok(builder);
+    }
+    Ok(builder.tag(Tag::parse(values).map_err(tag_error)?))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_create_repo(
     client: &BuzzClient,
@@ -250,15 +271,19 @@ pub async fn cmd_create_repo(
     web_url: Option<&str>,
     relays: &[String],
     channel: Option<&str>,
+    maintainers: &[String],
 ) -> Result<(), CliError> {
-    let builder = build_create_announcement(
-        repo_id,
-        name,
-        description,
-        clone_urls,
-        web_url,
-        relays,
-        channel,
+    let builder = with_maintainers(
+        build_create_announcement(
+            repo_id,
+            name,
+            description,
+            clone_urls,
+            web_url,
+            relays,
+            channel,
+        )?,
+        maintainers,
     )?;
     let event = client.sign_event(builder)?;
     let owner = event.pubkey.to_hex();
@@ -426,6 +451,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
             web,
             relays,
             channel,
+            maintainers,
         } => {
             cmd_create_repo(
                 client,
@@ -436,6 +462,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
                 web.as_deref(),
                 &relays,
                 channel.as_deref(),
+                &maintainers,
             )
             .await
         }
@@ -479,7 +506,7 @@ mod tests {
 
     use super::{
         build_create_announcement, build_protection_tag, build_updated_repo_announcement,
-        protection_rules_json, validate_write_response, RepoChange,
+        protection_rules_json, validate_write_response, with_maintainers, RepoChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -820,6 +847,53 @@ mod tests {
                 .any(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel")),
             "no --channel means no binding tag (vanilla NIP-34 stays possible)"
         );
+    }
+
+    #[test]
+    fn create_writes_one_maintainers_tag_from_hex_and_npub() {
+        let hex_maintainer = Keys::generate().public_key();
+        let npub_maintainer = Keys::generate().public_key();
+        let npub = nostr::ToBech32::to_bech32(&npub_maintainer).expect("encode npub");
+        let base = || build_create_announcement("demo", None, None, &[], None, &[], None).unwrap();
+
+        let event = with_maintainers(
+            base(),
+            &[
+                hex_maintainer.to_hex().to_uppercase(),
+                npub,
+                hex_maintainer.to_hex(),
+            ],
+        )
+        .expect("build with maintainers")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign create announcement");
+        let maintainers: Vec<_> = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("maintainers"))
+            .collect();
+        assert_eq!(maintainers.len(), 1);
+        assert_eq!(
+            maintainers[0].as_slice(),
+            [
+                "maintainers".to_string(),
+                hex_maintainer.to_hex(),
+                npub_maintainer.to_hex()
+            ]
+        );
+
+        let bare = with_maintainers(base(), &[])
+            .unwrap()
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        assert!(!bare
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("maintainers")));
+        assert!(matches!(
+            with_maintainers(base(), &["nope".to_string()]),
+            Err(crate::error::CliError::Usage(_))
+        ));
     }
 
     #[test]

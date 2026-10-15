@@ -26,6 +26,7 @@ import {
 
 type RepositoryReference = {
   repoAddress: string;
+  maintainers?: readonly string[];
 };
 
 type ProjectReference = {
@@ -177,6 +178,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
           updatesByRepo.get(repository.repoAddress) ?? [],
           commentsByRepo.get(repository.repoAddress) ?? [],
           statusesByRepo.get(repository.repoAddress) ?? [],
+          repository.maintainers,
         ).map((pullRequest) => ({ project, pullRequest, repository })),
       ),
     )
@@ -210,6 +212,7 @@ export async function fetchProjectsWorkItems<TProject extends ProjectReference>(
           ),
           statusesByRepo.get(repository.repoAddress) ?? [],
           commentsByRepo.get(repository.repoAddress) ?? [],
+          repository.maintainers,
         ).map((issue) => ({ issue, project, repository })),
       ),
     )

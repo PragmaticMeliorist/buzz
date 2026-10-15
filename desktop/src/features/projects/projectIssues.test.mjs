@@ -107,6 +107,25 @@ test("honors status events from the issue author and repo owner", () => {
   );
 });
 
+test("honors status events from repo announcement maintainers", () => {
+  const maintainer = "d".repeat(64);
+  const maintainerClosed = statusEvent({
+    kind: 1632,
+    pubkey: maintainer,
+    createdAt: 300,
+  });
+
+  assert.equal(
+    eventToProjectIssue(issueEvent(), [maintainerClosed], [], [maintainer])
+      .status,
+    PROJECT_ISSUE_STATUS.CLOSED,
+  );
+  assert.equal(
+    eventToProjectIssue(issueEvent(), [maintainerClosed]).status,
+    PROJECT_ISSUE_STATUS.BACKLOG,
+  );
+});
+
 test("tag helpers drop malformed value-less tags", () => {
   const event = issueEvent({
     tags: [
