@@ -107,6 +107,38 @@ test("honors status events from the issue author and repo owner", () => {
   );
 });
 
+test("honors status and assignment events from repo maintainers", () => {
+  const maintainer = "9".repeat(64);
+  const assignee = "d".repeat(64);
+  const maintainerClosed = statusEvent({
+    kind: 1632,
+    pubkey: maintainer,
+    createdAt: 300,
+  });
+  const maintainerAssigned = assignmentComment(
+    maintainer,
+    [assignee],
+    "maintainer-assign",
+  );
+
+  const withoutMaintainers = eventToProjectIssue(
+    issueEvent(),
+    [maintainerClosed],
+    [maintainerAssigned],
+  );
+  assert.equal(withoutMaintainers.status, PROJECT_ISSUE_STATUS.BACKLOG);
+  assert.deepEqual(withoutMaintainers.assignees, []);
+
+  const withMaintainers = eventToProjectIssue(
+    issueEvent(),
+    [maintainerClosed],
+    [maintainerAssigned],
+    [maintainer.toUpperCase()],
+  );
+  assert.equal(withMaintainers.status, PROJECT_ISSUE_STATUS.CLOSED);
+  assert.deepEqual(withMaintainers.assignees, [assignee]);
+});
+
 test("tag helpers drop malformed value-less tags", () => {
   const event = issueEvent({
     tags: [

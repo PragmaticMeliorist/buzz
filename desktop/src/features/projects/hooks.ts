@@ -239,6 +239,7 @@ async function fetchProjectIssues(
     issueEvents,
     statusEvents,
     mergeEventsById(commentEvents, assignmentEvents),
+    project.maintainers,
   );
 }
 
