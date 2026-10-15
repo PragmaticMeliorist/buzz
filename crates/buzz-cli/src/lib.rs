@@ -1259,6 +1259,12 @@ pub enum ReposCmd {
         /// the author runs `buzz repos bind` (issue #3527).
         #[arg(long)]
         channel: Option<String>,
+        /// Maintainer pubkey (hex or npub) written to the NIP-34
+        /// `maintainers` tag — can be specified multiple times. Clients
+        /// trust maintainers' issue status and assignment events. Omit to
+        /// keep the existing announcement's maintainers.
+        #[arg(long = "maintainer")]
+        maintainers: Vec<String>,
     },
     /// Get a repository announcement
     Get {
@@ -1823,7 +1829,9 @@ pub enum IssuesCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
-    /// Set status on an issue (open/resolved/closed/draft — NIP-34 kind:1630-1633)
+    /// Set status on an issue (open/resolved/closed/draft — NIP-34 kind:1630-1633).
+    /// Refuses unless you are the issue author, repo owner, or a repo
+    /// maintainer, since clients ignore status signed by anyone else.
     Status {
         /// Issue event id
         #[arg(long)]
@@ -1850,8 +1858,9 @@ pub enum IssuesCmd {
         to: Vec<String>,
     },
     /// Assign an issue to one or more people or agents. Only assignments
-    /// signed by the issue author or repo owner are trusted by clients;
-    /// anyone may assign themselves (sole assignee = your own pubkey).
+    /// signed by the issue author, repo owner, or a repo maintainer are
+    /// trusted by clients; anyone may assign themselves (sole assignee =
+    /// your own pubkey).
     Assign {
         /// Issue event id (64-char hex)
         #[arg(long)]
@@ -1870,8 +1879,9 @@ pub enum IssuesCmd {
         #[arg(long)]
         label: Option<String>,
     },
-    /// Remove one or more assignees from an issue. Issue authors and repo
-    /// owners may remove anyone; other users may remove only themselves.
+    /// Remove one or more assignees from an issue. Issue authors, repo
+    /// owners, and repo maintainers may remove anyone; other users may
+    /// remove only themselves.
     Unassign {
         /// Issue event id (64-char hex)
         #[arg(long)]

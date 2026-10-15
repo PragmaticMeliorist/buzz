@@ -2,7 +2,7 @@ use buzz_core::{
     git_perms::{parse_protection_tag, parse_protection_tags, RefPattern},
     kind::KIND_GIT_REPO_ANNOUNCEMENT,
 };
-use nostr::{Event, EventBuilder, Tag, Timestamp};
+use nostr::{Event, EventBuilder, PublicKey, Tag, Timestamp};
 
 use crate::client::BuzzClient;
 use crate::commands::parse_write_response;
@@ -240,6 +240,37 @@ pub(crate) fn build_create_announcement(
     Ok(builder)
 }
 
+/// The NIP-34 `maintainers` tag for `repos create`: the `--maintainer`
+/// values (hex or npub) when given, otherwise the existing announcement's
+/// maintainers, so republishing does not drop them.
+fn maintainers_tag(
+    requested: &[String],
+    existing: Option<&Event>,
+) -> Result<Option<Tag>, CliError> {
+    let mut maintainers = Vec::new();
+    if requested.is_empty() {
+        for tag in existing.iter().flat_map(|event| event.tags.iter()) {
+            if has_tag_name(tag, "maintainers") {
+                maintainers.extend(tag.as_slice()[1..].iter().cloned());
+            }
+        }
+    }
+    for value in requested {
+        let pubkey = PublicKey::parse(value.trim())
+            .map_err(|_| CliError::Usage(format!("invalid --maintainer pubkey: {value}")))?
+            .to_hex();
+        if !maintainers.contains(&pubkey) {
+            maintainers.push(pubkey);
+        }
+    }
+    if maintainers.is_empty() {
+        return Ok(None);
+    }
+    Tag::parse(std::iter::once("maintainers".to_string()).chain(maintainers))
+        .map(Some)
+        .map_err(|error| CliError::Other(format!("failed to build maintainers tag: {error}")))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_create_repo(
     client: &BuzzClient,
@@ -250,8 +281,9 @@ pub async fn cmd_create_repo(
     web_url: Option<&str>,
     relays: &[String],
     channel: Option<&str>,
+    maintainers: &[String],
 ) -> Result<(), CliError> {
-    let builder = build_create_announcement(
+    let mut builder = build_create_announcement(
         repo_id,
         name,
         description,
@@ -260,6 +292,14 @@ pub async fn cmd_create_repo(
         relays,
         channel,
     )?;
+    let existing = if maintainers.is_empty() {
+        fetch_own_repo_announcement(client, repo_id).await?
+    } else {
+        None
+    };
+    if let Some(tag) = maintainers_tag(maintainers, existing.as_ref())? {
+        builder = builder.tag(tag);
+    }
     let event = client.sign_event(builder)?;
     let owner = event.pubkey.to_hex();
     let resp = client.submit_event(event).await?;
@@ -426,6 +466,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
             web,
             relays,
             channel,
+            maintainers,
         } => {
             cmd_create_repo(
                 client,
@@ -436,6 +477,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
                 web.as_deref(),
                 &relays,
                 channel.as_deref(),
+                &maintainers,
             )
             .await
         }
@@ -479,7 +521,7 @@ mod tests {
 
     use super::{
         build_create_announcement, build_protection_tag, build_updated_repo_announcement,
-        protection_rules_json, validate_write_response, RepoChange,
+        maintainers_tag, protection_rules_json, validate_write_response, RepoChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -827,6 +869,58 @@ mod tests {
         let error = build_create_announcement("demo", None, None, &[], None, &[], Some("nope"))
             .expect_err("malformed channel id must not build an announcement");
         assert!(matches!(error, crate::error::CliError::Usage(_)));
+    }
+
+    #[test]
+    fn create_maintainers_accept_hex_and_npub_and_deduplicate() {
+        use nostr::ToBech32;
+        let first = Keys::generate().public_key();
+        let second = Keys::generate().public_key();
+
+        let tag = maintainers_tag(
+            &[
+                first.to_hex().to_uppercase(),
+                second.to_bech32().expect("npub"),
+                first.to_hex(),
+            ],
+            None,
+        )
+        .expect("valid maintainers")
+        .expect("maintainers tag");
+
+        assert_eq!(
+            tag.as_slice(),
+            ["maintainers", &first.to_hex(), &second.to_hex()]
+        );
+        assert!(matches!(
+            maintainers_tag(&["nope".into()], None),
+            Err(crate::error::CliError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn create_keeps_existing_maintainers_unless_new_ones_are_given() {
+        let kept = "c".repeat(64);
+        let existing = signed_repo(
+            vec![tag(&["d", "demo"]), tag(&["maintainers", &kept])],
+            "",
+            10,
+        );
+
+        let carried = maintainers_tag(&[], Some(&existing))
+            .expect("carry maintainers")
+            .expect("maintainers tag");
+        assert_eq!(carried.as_slice(), ["maintainers", kept.as_str()]);
+
+        let replacement = Keys::generate().public_key().to_hex();
+        let replaced = maintainers_tag(std::slice::from_ref(&replacement), Some(&existing))
+            .expect("replace maintainers")
+            .expect("maintainers tag");
+        assert_eq!(replaced.as_slice(), ["maintainers", replacement.as_str()]);
+
+        assert!(maintainers_tag(&[], None)
+            .expect("no maintainers")
+            .is_none());
     }
 
     #[test]
