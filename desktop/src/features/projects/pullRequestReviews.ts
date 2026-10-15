@@ -40,7 +40,8 @@ const PR_STATUS_KIND_BY_LIFECYCLE: Record<
 
 // Same shape as `buzz pr status` (buzz-sdk build_git_status): root `e` tag,
 // repo `a` tag, and `p` tags for the repo owner + PR author. Only the PR
-// author or repo owner are trusted for status changes (allowedActorsForRoot).
+// author, repo owner, or a repo maintainer are trusted for status changes
+// (allowedActorsForRoot).
 async function updateProjectPullRequestStatus({
   project,
   pullRequest,

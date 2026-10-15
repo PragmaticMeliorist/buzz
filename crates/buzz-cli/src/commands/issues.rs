@@ -144,6 +144,7 @@ fn reduce_assignment_operations(
     issue_id: &str,
     issue_author: &str,
     repo_owner: &str,
+    maintainers: &[String],
     events: &[AssignmentEvent],
 ) -> AssignmentState {
     let issue_author = issue_author.to_ascii_lowercase();
@@ -173,7 +174,8 @@ fn reduce_assignment_operations(
             .into_iter()
             .map(str::to_ascii_lowercase)
             .collect::<Vec<_>>();
-        let is_authoritative = signer == issue_author || signer == repo_owner;
+        let is_authoritative =
+            signer == issue_author || signer == repo_owner || maintainers.contains(&signer);
         let is_self_operation = pubkeys.len() == 1 && pubkeys[0] == signer;
         if !is_authoritative && !is_self_operation {
             continue;
@@ -300,8 +302,8 @@ async fn resolve_issue_repo_target(
 
 /// Publish an issue assignment: a kind:1 comment on the issue whose `p`
 /// tags are the assignees, labeled `t: assignment` (same event shape the
-/// Desktop app writes). Clients trust it when signed by the issue author
-/// or repo owner, or when it is a self-assignment.
+/// Desktop app writes). Clients trust it when signed by the issue author,
+/// repo owner, or a repo maintainer, or when it is a self-assignment.
 pub async fn cmd_assign_issue(
     client: &BuzzClient,
     issue: &str,
@@ -466,15 +468,114 @@ async fn issue_assignment_context(
         .map_err(|error| CliError::Other(format!("read system clock: {error}")))?
         .as_secs()
         .max(latest.saturating_add(1));
-    let prior = include_prior
-        .then(|| {
-            reduce_assignment_operations(issue, &root.pubkey, &repo.owner, &comments)
-                .heads
-                .get(&signer.to_ascii_lowercase())
-                .cloned()
-        })
-        .flatten();
+    let prior = if include_prior {
+        let maintainers = fetch_repo_maintainers(client, &repo.owner, &repo.id).await?;
+        reduce_assignment_operations(issue, &root.pubkey, &repo.owner, &maintainers, &comments)
+            .heads
+            .get(&signer.to_ascii_lowercase())
+            .cloned()
+    } else {
+        None
+    };
     Ok(IssueAssignmentContext { created_at, prior })
+}
+
+/// `maintainers` tag values on a kind:30617 announcement, as lowercase hex.
+fn announcement_maintainers(event: &AssignmentQueryEvent) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| tag.first().map(String::as_str) == Some("maintainers"))
+        .flat_map(|tag| tag.iter().skip(1))
+        .filter(|value| is_hex64(value))
+        .map(|value| value.to_ascii_lowercase())
+        .collect()
+}
+
+/// Maintainers listed on the owner's own announcement of the repository.
+async fn fetch_repo_maintainers(
+    client: &BuzzClient,
+    repo_owner: &str,
+    repo_id: &str,
+) -> Result<Vec<String>, CliError> {
+    let filter = serde_json::json!({
+        "kinds": [30617],
+        "authors": [repo_owner],
+        "#d": [repo_id],
+        "limit": 1
+    });
+    let response = client.query(&filter).await?;
+    let events = serde_json::from_str::<Vec<AssignmentQueryEvent>>(&response)
+        .map_err(|error| CliError::Other(format!("parse repo announcement: {error}")))?;
+    Ok(events
+        .iter()
+        .filter(|event| event.kind == 30617 && event.pubkey.eq_ignore_ascii_case(repo_owner))
+        .max_by_key(|event| event.created_at)
+        .map(announcement_maintainers)
+        .unwrap_or_default())
+}
+
+/// Refuse a status change Buzz Desktop would ignore. Desktop honors status
+/// events only from the issue author, the repo owner named by the issue's
+/// first `a` tag, and the maintainers on that repo's announcement.
+fn ensure_status_signer(
+    signer: &str,
+    issue_author: &str,
+    repo_owner: Option<&str>,
+    maintainers: &[String],
+) -> Result<(), CliError> {
+    let signer = signer.to_ascii_lowercase();
+    if signer.eq_ignore_ascii_case(issue_author)
+        || repo_owner.is_some_and(|owner| owner.eq_ignore_ascii_case(&signer))
+        || maintainers.contains(&signer)
+    {
+        return Ok(());
+    }
+    let maintainers = if maintainers.is_empty() {
+        "none listed".to_string()
+    } else {
+        maintainers.join(", ")
+    };
+    Err(CliError::Auth(format!(
+        "signer {signer} cannot change this issue's status. Only these can sign it: \
+         issue author {}, repo owner {}, repo maintainers: {maintainers}",
+        issue_author.to_ascii_lowercase(),
+        repo_owner.unwrap_or("(issue names no repo)"),
+    )))
+}
+
+async fn ensure_issue_status_signer(client: &BuzzClient, issue: &str) -> Result<(), CliError> {
+    let filter = serde_json::json!({
+        "kinds": [1621],
+        "ids": [issue],
+        "limit": 1
+    });
+    let response = client.query(&filter).await?;
+    let events = serde_json::from_str::<Vec<AssignmentQueryEvent>>(&response)
+        .map_err(|error| CliError::Other(format!("parse issue: {error}")))?;
+    let root = events
+        .iter()
+        .find(|event| event.kind == 1621 && event.id.eq_ignore_ascii_case(issue))
+        .ok_or_else(|| CliError::NotFound(format!("issue {issue} was not found")))?;
+    let repo = root
+        .tags
+        .iter()
+        .find_map(|tag| match tag.as_slice() {
+            [name, value, ..] if name == "a" && !value.is_empty() => Some(value),
+            _ => None,
+        })
+        .and_then(|value| crate::commands::project_channel::parse_repo_a_tag(value))
+        .filter(|repo| is_hex64(&repo.repo_owner));
+    let maintainers = match &repo {
+        Some(repo) => fetch_repo_maintainers(client, &repo.repo_owner, &repo.repo_id).await?,
+        None => Vec::new(),
+    };
+    ensure_status_signer(
+        &client.keys().public_key().to_hex(),
+        &root.pubkey,
+        repo.as_ref().map(|repo| repo.repo_owner.as_str()),
+        &maintainers,
+    )
 }
 
 pub async fn cmd_get_issue(client: &BuzzClient, event: &str) -> Result<(), CliError> {
@@ -569,6 +670,8 @@ pub async fn cmd_issue_status(
             recipients.push(recipient.clone());
         }
     }
+
+    ensure_issue_status_signer(client, issue).await?;
 
     let meta = GitStatusMeta {
         root_event: issue.to_string(),
@@ -689,7 +792,8 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::{
-        assignment_note_label, reduce_assignment_operations, AssignmentEvent, AssignmentQueryEvent,
+        announcement_maintainers, assignment_note_label, ensure_status_signer,
+        reduce_assignment_operations, AssignmentEvent, AssignmentQueryEvent,
         ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL,
     };
 
@@ -697,6 +801,7 @@ mod tests {
     const AUTHOR: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const VOLUNTEER: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+    const MAINTAINER: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
 
     fn assignment_event(
         pubkey: &str,
@@ -771,6 +876,7 @@ mod tests {
             ISSUE,
             AUTHOR,
             OWNER,
+            &[],
             &[
                 assignment_event(VOLUNTEER, &"2".repeat(64), true, 1_000, None),
                 assignment_event(OWNER, &owner_unassign, false, 200, None),
@@ -784,6 +890,7 @@ mod tests {
             ISSUE,
             AUTHOR,
             OWNER,
+            &[],
             &[
                 assignment_event(VOLUNTEER, &"4".repeat(64), false, 1_000, None),
                 assignment_event(OWNER, &owner_assign, true, 200, None),
@@ -801,6 +908,7 @@ mod tests {
             ISSUE,
             AUTHOR,
             OWNER,
+            &[],
             &[
                 assignment_event(OWNER, &owner_assign, true, 200, None),
                 assignment_event(VOLUNTEER, &self_unassign, false, 300, Some(&owner_assign)),
@@ -815,6 +923,7 @@ mod tests {
             ISSUE,
             AUTHOR,
             OWNER,
+            &[],
             &[
                 assignment_event(OWNER, &owner_unassign, false, 200, None),
                 assignment_event(VOLUNTEER, &self_assign, true, 300, Some(&owner_unassign)),
@@ -832,6 +941,7 @@ mod tests {
             ISSUE,
             AUTHOR,
             OWNER,
+            &[],
             &[
                 assignment_event(OWNER, &initial_assign, true, 100, None),
                 assignment_event(OWNER, &owner_unassign, false, 200, None),
@@ -841,5 +951,60 @@ mod tests {
 
         assert!(!state.assignees.contains(VOLUNTEER));
         assert_eq!(state.heads.get(VOLUNTEER), Some(&owner_unassign));
+    }
+
+    #[test]
+    fn status_signer_must_be_author_owner_or_maintainer() {
+        let maintainers = vec![MAINTAINER.to_string()];
+        for signer in [AUTHOR, OWNER, MAINTAINER] {
+            assert!(ensure_status_signer(signer, AUTHOR, Some(OWNER), &maintainers).is_ok());
+        }
+        assert!(ensure_status_signer(&AUTHOR.to_uppercase(), AUTHOR, None, &[]).is_ok());
+
+        let message = ensure_status_signer(VOLUNTEER, AUTHOR, Some(OWNER), &maintainers)
+            .unwrap_err()
+            .to_string();
+        for named in [VOLUNTEER, AUTHOR, OWNER, MAINTAINER] {
+            assert!(message.contains(named), "{message}");
+        }
+        assert!(ensure_status_signer(MAINTAINER, AUTHOR, Some(OWNER), &[]).is_err());
+    }
+
+    #[test]
+    fn announcement_maintainers_reads_every_value_of_every_tag() {
+        let event = serde_json::from_value::<AssignmentQueryEvent>(serde_json::json!({
+            "id": "1".repeat(64),
+            "kind": 30617,
+            "pubkey": OWNER,
+            "created_at": 200,
+            "tags": [
+                ["d", "demo"],
+                ["maintainers", MAINTAINER.to_uppercase(), "not-a-pubkey"],
+                ["maintainers", VOLUNTEER]
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            announcement_maintainers(&event),
+            vec![MAINTAINER.to_string(), VOLUNTEER.to_string()]
+        );
+    }
+
+    #[test]
+    fn maintainer_assignment_operations_are_authoritative() {
+        let maintainer_unassign = "d".repeat(64);
+        let events = [
+            assignment_event(VOLUNTEER, &"e".repeat(64), true, 1_000, None),
+            assignment_event(MAINTAINER, &maintainer_unassign, false, 200, None),
+        ];
+
+        let state =
+            reduce_assignment_operations(ISSUE, AUTHOR, OWNER, &[MAINTAINER.to_string()], &events);
+        assert!(!state.assignees.contains(VOLUNTEER));
+        assert_eq!(state.heads.get(VOLUNTEER), Some(&maintainer_unassign));
+
+        let state = reduce_assignment_operations(ISSUE, AUTHOR, OWNER, &[], &events);
+        assert!(state.assignees.contains(VOLUNTEER));
     }
 }

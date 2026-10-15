@@ -185,3 +185,32 @@ test("fetchProjectsWorkItems returns a single row for a PR present in both proje
   // Sanity: the stub was actually called (proves we ran the production path).
   assert.ok(callCount >= 1, "fetchEvents must have been called");
 });
+
+test("fetchProjectsWorkItems trusts status events from repository maintainers", async () => {
+  const maintainer = "d".repeat(64);
+  const closedBy = (rootId) => ({
+    id: `closed-${rootId.slice(0, 1)}`,
+    kind: 1632,
+    pubkey: maintainer,
+    created_at: 300,
+    content: "",
+    tags: [
+      ["e", rootId, "", "root"],
+      ["a", REPO_ADDRESS],
+    ],
+  });
+  const roots = [makeIssue(ISSUE_ID), makePR(PR_ID)];
+  const fetchEvents = async ({ kinds }) => {
+    if (kinds?.includes(1621)) return roots;
+    if (kinds?.includes(1632)) return [closedBy(ISSUE_ID), closedBy(PR_ID)];
+    return [];
+  };
+  const project = {
+    repositories: [{ repoAddress: REPO_ADDRESS, maintainers: [maintainer] }],
+  };
+
+  const result = await fetchProjectsWorkItems([project], fetchEvents);
+
+  assert.equal(result.issues.items[0].issue.status, "Closed");
+  assert.equal(result.pullRequests.items[0].pullRequest.status, "Closed");
+});

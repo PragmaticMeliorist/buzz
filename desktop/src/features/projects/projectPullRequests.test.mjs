@@ -226,6 +226,31 @@ test("honors status events from the PR author and repo owner", () => {
   assert.equal(closedPullRequest.status, "Closed");
 });
 
+test("honors status events from repo announcement maintainers", () => {
+  const maintainer = "d".repeat(64);
+  const maintainerClosed = statusEvent({
+    kind: 1632,
+    pubkey: maintainer,
+    createdAt: 300,
+  });
+
+  assert.equal(
+    eventToProjectPullRequest(
+      pullRequestEvent(),
+      [],
+      [],
+      [maintainerClosed],
+      [maintainer],
+    ).status,
+    "Closed",
+  );
+  assert.equal(
+    eventToProjectPullRequest(pullRequestEvent(), [], [], [maintainerClosed])
+      .status,
+    "Open",
+  );
+});
+
 function commentEvent({
   id,
   pubkey,

@@ -1259,6 +1259,12 @@ pub enum ReposCmd {
         /// the author runs `buzz repos bind` (issue #3527).
         #[arg(long)]
         channel: Option<String>,
+        /// Maintainer pubkey (hex or npub), written to the NIP-34
+        /// `maintainers` tag — can be specified multiple times. Maintainers
+        /// may change issue and PR status. Re-run with the same --id to
+        /// replace the list.
+        #[arg(long = "maintainer")]
+        maintainers: Vec<String>,
     },
     /// Get a repository announcement
     Get {
