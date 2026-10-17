@@ -261,6 +261,7 @@ pub(crate) struct PromptResponseUsage {
 pub(crate) enum StandardAdapterKind {
     Claude,
     Codex,
+    Pi,
 }
 
 #[derive(Debug, Default)]
@@ -329,8 +330,11 @@ impl StandardUsageTracker {
                     .input_tokens
                     .checked_add(usage.cached_read_tokens.unwrap_or(0))
                     .and_then(|input| input.checked_add(usage.cached_write_tokens.unwrap_or(0)));
-                let total_tokens =
-                    (adapter == StandardAdapterKind::Codex).then_some(usage.total_tokens);
+                let total_tokens = matches!(
+                    adapter,
+                    StandardAdapterKind::Codex | StandardAdapterKind::Pi
+                )
+                .then_some(usage.total_tokens);
                 (
                     inclusive_input,
                     inclusive_input.map(|_| usage.output_tokens),

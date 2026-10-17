@@ -592,6 +592,7 @@ impl AcpClient {
                     Some(StandardAdapterKind::Claude)
                 }
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
+                BUZZ_PI_ACP_NAME => Some(StandardAdapterKind::Pi),
                 _ => None,
             };
         cmd.envs(launch_env.iter().cloned());
@@ -4715,6 +4716,41 @@ sleep 1"#,
         );
         assert_eq!(usage.cumulative_input_tokens, None);
         assert_eq!(usage.cumulative_output_tokens, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn buzz_pi_acp_prompt_response_usage_keeps_provider_counts() {
+        let (mut client, dir) = spawn_named_script("buzz-pi-acp", "sleep 60").await;
+        assert_eq!(client.standard_adapter, Some(StandardAdapterKind::Pi));
+        client.standard_usage.begin_turn("pi-session");
+        client.handle_session_update(&standard_cost_update("pi-session", 0.042));
+        client
+            .parse_prompt_response(
+                "pi-session",
+                &prompt_response_usage(100, 20, 175, Some(30), Some(25)),
+            )
+            .unwrap();
+
+        let usage = client.take_turn_usage().expect("prompt usage");
+        assert!(usage.delta_reliable);
+        assert_eq!(usage.turn_input_tokens, Some(155));
+        assert_eq!(usage.turn_output_tokens, Some(20));
+        assert_eq!(usage.turn_total_tokens, Some(175));
+        assert_eq!(usage.turn_cache_read_tokens, Some(30));
+        assert_eq!(usage.turn_cache_write_tokens, Some(25));
+        assert_eq!(usage.cumulative_cost_usd, None);
+
+        let (turn_counts, _) = crate::pool::build_turn_metric_counts(&usage);
+        let turn = turn_counts.expect("kind 44200 turn counts");
+        assert_eq!(turn.input_tokens, Some(155));
+        assert_eq!(turn.output_tokens, Some(20));
+        assert_eq!(turn.total_tokens, Some(175));
+        assert_eq!(turn.cache_read_tokens, Some(30));
+        assert_eq!(turn.cache_write_tokens, Some(25));
+
+        drop(client);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
